@@ -17,13 +17,13 @@ permissions:
 
 jobs:
   wait-and-comment:
-    if: contains(github.event.pull_request.labels.*.name, 'preview')
+    if: vars.AWS_ENABLED == 'true' && contains(github.event.pull_request.labels.*.name, 'preview')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-southeast-2
@@ -71,7 +71,7 @@ jobs:
           echo "url=https://$HOST" >> "$GITHUB_OUTPUT"
 
       - name: comment URL
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: preview
           message: |

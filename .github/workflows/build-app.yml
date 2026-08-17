@@ -2,33 +2,54 @@ name: build-app
 
 # Supply chain pipeline: build -> SBOM -> scan -> sign -> push.
 #
-# The signature is keyless (Sigstore): the OIDC identity of *this workflow*
-# is what gets attested, so there is no signing key to leak. Kyverno's
+# The signature is keyless (Sigstore): the OIDC identity of *this workflow* is
+# what gets attested, so there is no signing key to leak. Kyverno's
 # verify-images policy refuses to run anything not signed by this exact
 # workflow path.
+#
+# Gated on AWS_ENABLED because pushing to ECR needs an account. Until then the
+# lint job still runs, so the Dockerfile does not rot unchecked.
+
 on:
   pull_request:
-    paths: ['app/**']
+    paths: ['app/**', '.github/workflows/build-app.yml']
   push:
     branches: [main]
-    paths: ['app/**']
+    paths: ['app/**', '.github/workflows/build-app.yml']
 
 permissions:
   contents: read
-  id-token: write
-  packages: write
 
 env:
   AWS_REGION: ap-southeast-2
   ECR_REPO: kea/app
 
 jobs:
-  build:
+  lint:
+    name: lint dockerfile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: hadolint
+        run: |
+          if [ ! -f app/Dockerfile ]; then
+            echo "::notice::app/Dockerfile not written yet (Phase 4) — skipping"
+            exit 0
+          fi
+          docker run --rm -i hadolint/hadolint < app/Dockerfile
 
-      - uses: aws-actions/configure-aws-credentials@v4
+  build:
+    name: build, scan, sign
+    runs-on: ubuntu-latest
+    needs: lint
+    if: vars.AWS_ENABLED == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -36,13 +57,13 @@ jobs:
       - id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      # Tag with the head SHA — the ApplicationSet templates the same value,
+      # Tagged with the head SHA — the ApplicationSet templates the same value,
       # so the preview environment runs exactly this build.
       - name: build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: app
           push: true
@@ -51,24 +72,24 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@v0.24.0
         with:
           image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           artifact-name: sbom.spdx.json
 
-      # Fail the build on critical CVEs. Start with exit-code 0 and a report,
-      # look at the real backlog, then turn the gate on — a scanner that fails
-      # on day one against a 200-CVE base image just gets bypassed.
+      # Fail on critical CVEs. Start with exit-code 0 and a report, look at the
+      # real backlog, then turn the gate on — a scanner that fails on day one
+      # against a 200-CVE base image just gets bypassed.
       - name: scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@v4
 
       - name: sign image
         run: |

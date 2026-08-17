@@ -18,8 +18,10 @@ permissions:
 jobs:
   teardown:
     runs-on: ubuntu-latest
+    # Needs a live cluster; see the gate note in terraform.yml
+    if: vars.AWS_ENABLED == 'true'
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-southeast-2
@@ -56,7 +58,7 @@ jobs:
           done
           echo "::warning::Namespace $NS still present after 2m. The reaper will sweep it."
 
-      - uses: marocchino/sticky-pull-request-comment@v2
+      - uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: preview
           message: |
