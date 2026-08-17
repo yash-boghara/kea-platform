@@ -1,7 +1,17 @@
 # Phase 0 toolchain. `make bootstrap`
+#
+# Note: `brew bundle` is atomic — one unresolvable formula aborts the whole
+# batch, so keep the taps below in sync with the formulae that need them.
+
+# Terraform left homebrew-core when HashiCorp relicensed it to BUSL 1.1;
+# it now ships from HashiCorp's own tap. Same for tflint.
+# (If you ever need a fully OSS toolchain, OpenTofu is the fork — but NZ job
+# postings say "Terraform", so Terraform is what this project uses.)
+tap "hashicorp/tap"
+tap "terraform-linters/tap"
 
 # Core
-brew "terraform"
+brew "hashicorp/tap/terraform"
 brew "awscli"
 brew "kubernetes-cli"
 brew "helm"
@@ -29,5 +39,5 @@ brew "kubectx"       # context/namespace switching
 brew "jq"
 brew "yq"
 brew "pre-commit"
-brew "tflint"
+brew "terraform-linters/tap/tflint"
 brew "terraform-docs"

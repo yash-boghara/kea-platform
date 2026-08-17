@@ -10,13 +10,19 @@ module "network" {
   source = "../../modules/network"
 
   name               = local.name
+  cluster_name       = local.name
   cidr               = "10.20.0.0/16"
   availability_zones = ["ap-southeast-2a", "ap-southeast-2b"]
 
-  # No managed NAT Gateway — ~US$32/mo saved. VPC endpoints cover what the
-  # nodes actually need to reach. docs/adr/0001-nat-strategy.md
-  enable_nat_gateway = false
-  vpc_endpoints      = ["s3", "ecr.api", "ecr.dkr", "logs", "sts", "ec2"]
+  # ~US$3/mo against ~US$66/mo for two managed NAT Gateways. The free S3 gateway
+  # endpoint is always created and carries ECR image layers, which is the bulk of
+  # the traffic. Single point of failure, accepted deliberately for ephemeral
+  # workloads — docs/adr/0001-nat-strategy.md
+  nat_mode = "instance"
+
+  # Deliberately empty. Interface endpoints cost ~US$7.30/mo EACH, PER AZ — they
+  # are a privacy control, not a cost saving. See the ADR.
+  interface_endpoints = []
 
   tags = local.tags
 }
