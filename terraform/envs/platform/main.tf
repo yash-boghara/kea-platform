@@ -51,10 +51,10 @@ module "eks" {
   # being able to explain.
   karpenter_capacity_types = ["spot", "on-demand"]
 
-  enable_irsa                = true
-  cluster_endpoint_public    = true
+  enable_irsa                   = true
+  cluster_endpoint_public       = true
   cluster_endpoint_public_cidrs = var.admin_cidrs
-  control_plane_log_types    = ["api", "audit", "authenticator"]
+  control_plane_log_types       = ["api", "audit", "authenticator"]
 
   tags = local.tags
 }

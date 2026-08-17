@@ -9,9 +9,14 @@ package terraform.encryption
 
 import rego.v1
 
-resources[r] if {
+# `contains` makes this a partial SET. Writing `resources[r] if { ... }` instead
+# defines a partial OBJECT whose values are `true`, so `some r in resources`
+# would iterate booleans rather than resources — which is exactly the bug the
+# unit tests caught here.
+resources contains r if {
 	some change in input.resource_changes
-	change.change.actions[_] in ["create", "update"]
+	some action in change.change.actions
+	action in {"create", "update"}
 	r := change
 }
 
@@ -35,10 +40,14 @@ sse_configured(bucket_address) if {
 
 # --- RDS ----------------------------------------------------------------
 
+# object.get with a `false` default is load-bearing, not style. Writing
+# `r.change.after.storage_encrypted != true` looks equivalent but is undefined
+# when the attribute is absent, so the rule never fires and an unencrypted
+# database passes. Absent must be treated as insecure: fail closed.
 deny contains msg if {
 	some r in resources
 	r.type in ["aws_db_instance", "aws_rds_cluster"]
-	r.change.after.storage_encrypted != true
+	object.get(r.change.after, "storage_encrypted", false) != true
 	msg := sprintf(
 		"[NZISM 22.1] Database '%s' is not encrypted at rest. Set storage_encrypted = true and supply a kms_key_id.",
 		[r.address],
@@ -50,7 +59,7 @@ deny contains msg if {
 deny contains msg if {
 	some r in resources
 	r.type == "aws_ebs_volume"
-	r.change.after.encrypted != true
+	object.get(r.change.after, "encrypted", false) != true
 	msg := sprintf(
 		"[NZISM 22.1] EBS volume '%s' is not encrypted. Set encrypted = true.",
 		[r.address],

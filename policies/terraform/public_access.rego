@@ -11,7 +11,11 @@ deny contains msg if {
 	change.type == "aws_s3_bucket_public_access_block"
 	settings := change.change.after
 	some field in ["block_public_acls", "block_public_policy", "ignore_public_acls", "restrict_public_buckets"]
-	settings[field] != true
+
+	# Default false, not a bare lookup: an absent setting is undefined in Rego,
+	# which would skip the rule entirely and let a partially-configured block
+	# through. See the same trap in encryption.rego.
+	object.get(settings, field, false) != true
 	msg := sprintf(
 		"[NZISM 19.1] '%s' sets %s = false. All four public access block settings must be true.",
 		[change.address, field],
