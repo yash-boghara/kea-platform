@@ -1,0 +1,53 @@
+# App-of-apps. This is the only thing you ever `kubectl apply` by hand.
+#
+# Everything else — addons, policies, preview environments — is reconciled from
+# Git by ArgoCD. If someone changes the cluster by hand, ArgoCD changes it back,
+# which is both the GitOps pitch and the best live demo in the project.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/CHANGEME/CHANGEME.git
+    targetRevision: main
+    path: gitops/platform
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# Preview environments get their own AppProject so their permissions can be
+# constrained: branch code should never be able to touch platform namespaces.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: previews
+  namespace: argocd
+spec:
+  description: Ephemeral per-PR environments. Least trusted workloads on the cluster.
+  sourceRepos:
+    - https://github.com/CHANGEME/CHANGEME.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: 'preview-*'
+  # Namespaced resources only — a preview cannot create ClusterRoles or CRDs.
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding

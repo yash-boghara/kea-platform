@@ -1,0 +1,106 @@
+name: terraform
+
+# Plan on every PR, apply only on main. The policy gate sits between them —
+# a plan that violates policy never reaches apply.
+on:
+  pull_request:
+    paths: ['terraform/**', 'policies/terraform/**', '.github/workflows/terraform.yml']
+  push:
+    branches: [main]
+    paths: ['terraform/**']
+
+permissions:
+  contents: read
+  id-token: write        # GitHub OIDC -> AWS. No long-lived keys anywhere.
+  pull-requests: write   # to comment the plan
+
+env:
+  TF_DIR: terraform/envs/platform
+  AWS_REGION: ap-southeast-2
+
+jobs:
+  policy-test:
+    name: policy unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: open-policy-agent/setup-conftest@v0
+      # The policies guard the infrastructure; these tests guard the policies.
+      - run: conftest verify -p policies/
+
+  plan:
+    name: plan and gate
+    runs-on: ubuntu-latest
+    needs: policy-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: fmt
+        run: terraform fmt -check -recursive
+
+      - name: init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -out=tfplan -no-color
+          terraform show -json tfplan > tfplan.json
+
+      # The gate. Readable output matters more than you'd think — a policy
+      # engine that only says "denied" gets disabled within a month.
+      - name: policy gate
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          conftest test tfplan.json \
+            --policy ../../../policies/terraform \
+            --all-namespaces \
+            --output table
+
+      - name: cost estimate
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+      - name: cost diff
+        working-directory: ${{ env.TF_DIR }}
+        run: infracost breakdown --path tfplan.json --format table
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 5
+
+  apply:
+    name: apply
+    runs-on: ubuntu-latest
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production    # add a required reviewer here in repo settings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init
+          terraform apply -auto-approve

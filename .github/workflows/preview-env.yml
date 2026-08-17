@@ -1,0 +1,100 @@
+name: preview-env
+
+# ArgoCD's PR generator does the provisioning. This workflow does the part
+# ArgoCD cannot: tell the human where their environment is, and record how
+# long it took.
+#
+# The provisioning-duration metric emitted here is the project's headline
+# number — measure it from the first day so you have the ugly early figure
+# to contrast against.
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  wait-and-comment:
+    if: contains(github.event.pull_request.labels.*.name, 'preview')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name kea-platform --region ap-southeast-2
+
+      - name: wait for healthy
+        id: wait
+        run: |
+          START=$(date +%s)
+          APP="preview-${{ github.event.pull_request.number }}"
+          HOST="pr-${{ github.event.pull_request.number }}.${{ vars.BASE_DOMAIN }}"
+
+          echo "Waiting for ArgoCD Application $APP to report Healthy..."
+          for i in $(seq 1 120); do
+            HEALTH=$(kubectl get application "$APP" -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || echo "NotFound")
+            SYNC=$(kubectl get application "$APP" -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            echo "  [$i] health=$HEALTH sync=$SYNC"
+            if [ "$HEALTH" = "Healthy" ] && [ "$SYNC" = "Synced" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$HEALTH" != "Healthy" ]; then
+            echo "::error::Environment did not become healthy in time (health=$HEALTH)"
+            kubectl describe application "$APP" -n argocd || true
+            exit 1
+          fi
+
+          # Then wait for DNS to actually resolve — "Healthy" in ArgoCD and
+          # "the URL works" are not the same moment, and the gap is what a
+          # reviewer clicking the link actually experiences.
+          echo "Waiting for DNS..."
+          for i in $(seq 1 60); do
+            if getent hosts "$HOST" >/dev/null 2>&1; then break; fi
+            sleep 5
+          done
+
+          DURATION=$(( $(date +%s) - START ))
+          echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
+          echo "url=https://$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: comment URL
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: preview
+          message: |
+            ### Preview environment ready
+
+            **URL:** ${{ steps.wait.outputs.url }}
+
+            | | |
+            |---|---|
+            | Namespace | `preview-${{ github.event.pull_request.number }}` |
+            | Image | `${{ github.event.pull_request.head.sha }}` |
+            | Ready in | ${{ steps.wait.outputs.duration }}s |
+            | TTL | 24h — reaped automatically, or on PR close |
+
+            <sub>Database is a fresh anonymised schema. Policy: signed images
+            only, non-root, resource limits enforced.</sub>
+
+      - name: record provisioning metric
+        run: |
+          # Pushgateway -> Prometheus -> the Grafana panel in docs/.
+          cat <<EOF | curl --data-binary @- \
+            "${{ vars.PUSHGATEWAY_URL }}/metrics/job/preview_env/pr/${{ github.event.pull_request.number }}"
+          # TYPE kea_preview_provision_seconds gauge
+          # HELP kea_preview_provision_seconds Time from PR event to resolvable URL.
+          kea_preview_provision_seconds ${{ steps.wait.outputs.duration }}
+          EOF

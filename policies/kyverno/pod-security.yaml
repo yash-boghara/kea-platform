@@ -1,0 +1,96 @@
+# Layer two: runtime admission control.
+#
+# CI policy (policies/terraform/) catches what Terraform provisions. This
+# catches what actually tries to run — including anything applied by hand,
+# by a Helm chart's defaults, or by a compromised pipeline.
+#
+# Roll out in Audit mode first. Look at what would have been blocked. Then
+# switch to Enforce and record what you found in the README.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: preview-pod-security
+  annotations:
+    policies.kyverno.io/title: Preview environment pod security
+    policies.kyverno.io/category: NZISM 14.1, 16.1
+    policies.kyverno.io/description: >-
+      Baseline workload hardening for ephemeral environments. Preview namespaces
+      run unreviewed branch code, so they are the least trusted workloads on the
+      cluster, not the most.
+spec:
+  validationFailureAction: Enforce   # start as Audit
+  background: true
+  rules:
+    - name: no-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  kea.platform/kind: preview
+      validate:
+        message: >-
+          Privileged containers are not permitted in preview environments.
+          Remove securityContext.privileged or request an exception via
+          docs/runbooks/policy-exception.md
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+
+    - name: require-non-root
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  kea.platform/kind: preview
+      validate:
+        message: "Containers must run as non-root (runAsNonRoot: true)."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): "true"
+            containers:
+              - =(securityContext):
+                  =(runAsNonRoot): "true"
+
+    - name: require-resource-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  kea.platform/kind: preview
+      validate:
+        message: >-
+          CPU and memory limits are required. Without them one preview
+          environment can starve every other one on the node.
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"
+
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: >-
+          Images must be pinned to a digest or an immutable tag. ':latest' makes
+          a deployment unreproducible and defeats image signature verification.
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"

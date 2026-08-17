@@ -1,0 +1,53 @@
+# Defaults for the sample workload. The ApplicationSet overrides prNumber,
+# image.tag, ingress.host and database.schema per pull request.
+#
+# Note what is set here vs left to policy: the chart sets sensible security
+# defaults, and Kyverno enforces them regardless of what the chart says. Both,
+# not either — the chart makes the right thing easy, the policy makes the wrong
+# thing impossible.
+
+prNumber: "0"
+
+image:
+  repository: CHANGEME.dkr.ecr.ap-southeast-2.amazonaws.com/kea/app
+  tag: ""          # always set by CI to the PR head SHA; never 'latest'
+  pullPolicy: IfNotPresent
+
+replicaCount: 1    # previews do not need HA
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:          # required by policies/kyverno/pod-security.yaml
+    cpu: 500m
+    memory: 256Mi
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+ingress:
+  enabled: true
+  className: nginx
+  host: ""         # pr-<n>.yourdomain.nz, set by the ApplicationSet
+  tls: true
+  clusterIssuer: letsencrypt-staging   # switch to -prod only when stable;
+                                       # prod rate limits will lock you out
+
+database:
+  schema: ""       # pr_<n>
+  host: ""         # shared preview RDS instance
+  secretName: preview-db
+
+# Consumed by the reaper. Overridable per PR by editing the label on the PR.
+ttlHours: 24
+
+serviceAccount:
+  create: true
+  # IRSA role, if the app needs AWS access
+  annotations: {}

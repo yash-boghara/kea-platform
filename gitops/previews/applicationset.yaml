@@ -1,0 +1,84 @@
+# The heart of the platform.
+#
+# ArgoCD's PR generator polls GitHub for open pull requests and renders one
+# Application per PR. Open a PR -> an environment exists. Close it -> ArgoCD
+# prunes the Application and, because the namespace carries the resources,
+# everything goes with it.
+#
+# The reaper (platform/reaper) is the safety net for cases this misses:
+# a PR left open for weeks, or an Application deleted while resources linger.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: preview-environments
+  namespace: argocd
+spec:
+  # Ensures a deleted ApplicationSet takes its Applications with it.
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+    - pullRequest:
+        github:
+          owner: CHANGEME          # your GitHub username
+          repo: CHANGEME           # this repo
+          tokenRef:
+            secretName: github-token
+            key: token
+        # Only PRs carrying this label get an environment. Opt-in keeps the
+        # cost bounded and stops dependabot from spinning up 30 clusters.
+        labels:
+          - preview
+        requeueAfterSeconds: 60
+
+  template:
+    metadata:
+      name: 'preview-{{.number}}'
+      labels:
+        kea.platform/kind: preview
+        kea.platform/pr: '{{.number}}'
+      annotations:
+        # Consumed by the reaper. Hours.
+        kea.platform/ttl: '24'
+        kea.platform/author: '{{.author}}'
+        kea.platform/branch: '{{.branch}}'
+    spec:
+      project: previews
+      source:
+        repoURL: https://github.com/CHANGEME/CHANGEME.git
+        targetRevision: '{{.head_sha}}'
+        path: app/chart
+        helm:
+          valuesObject:
+            prNumber: '{{.number}}'
+            # Image tag is the PR head SHA — built, scanned and signed by
+            # .github/workflows/build-app.yml before this ever syncs.
+            image:
+              tag: '{{.head_sha}}'
+            ingress:
+              host: 'pr-{{.number}}.CHANGEME.nz'
+            database:
+              # Schema-per-PR on one shared instance. An RDS instance per PR
+              # is the expensive mistake — see docs/adr/0003-preview-data.md
+              schema: 'pr_{{.number}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'preview-{{.number}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          # Propagate labels to the namespace so cost allocation and the
+          # reaper can find it without parsing names.
+          - "Replace=false"
+        retry:
+          limit: 3
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 2m

@@ -1,0 +1,82 @@
+name: build-app
+
+# Supply chain pipeline: build -> SBOM -> scan -> sign -> push.
+#
+# The signature is keyless (Sigstore): the OIDC identity of *this workflow*
+# is what gets attested, so there is no signing key to leak. Kyverno's
+# verify-images policy refuses to run anything not signed by this exact
+# workflow path.
+on:
+  pull_request:
+    paths: ['app/**']
+  push:
+    branches: [main]
+    paths: ['app/**']
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECR_REPO: kea/app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Tag with the head SHA — the ApplicationSet templates the same value,
+      # so the preview environment runs exactly this build.
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.event.pull_request.head.sha || github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: sbom.spdx.json
+
+      # Fail the build on critical CVEs. Start with exit-code 0 and a report,
+      # look at the real backlog, then turn the gate on — a scanner that fails
+      # on day one against a 200-CVE base image just gets bypassed.
+      - name: scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign image
+        run: |
+          cosign sign --yes \
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}
+
+      - name: attach SBOM attestation
+        run: |
+          cosign attest --yes --type spdxjson \
+            --predicate sbom.spdx.json \
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}@${{ steps.build.outputs.digest }}

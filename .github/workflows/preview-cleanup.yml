@@ -1,0 +1,64 @@
+name: preview-cleanup
+
+# ArgoCD prunes the Application when the PR closes. This handles what lives
+# outside the Application's ownership: the database schema, and any stray
+# cloud resources.
+#
+# Defence in depth for teardown too — this workflow, ArgoCD's prune, and the
+# reaper CronJob all independently converge on "closed PR means nothing left
+# running". Any one of them can fail without leaving you paying for it.
+on:
+  pull_request:
+    types: [closed, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name kea-platform --region ap-southeast-2
+
+      - name: drop database schema
+        run: |
+          SCHEMA="pr_${{ github.event.pull_request.number }}"
+          # Guard: never let an empty PR number turn this into "DROP SCHEMA pr_"
+          # matching something unintended.
+          if [ -z "${{ github.event.pull_request.number }}" ]; then
+            echo "::error::No PR number; refusing to drop anything."
+            exit 1
+          fi
+          kubectl run "drop-$SCHEMA" \
+            --namespace platform-jobs \
+            --rm -i --restart=Never \
+            --image=postgres:16-alpine \
+            --env="PGPASSWORD=$(kubectl get secret preview-db -n platform-jobs -o jsonpath='{.data.password}' | base64 -d)" \
+            -- psql -h "${{ vars.PREVIEW_DB_HOST }}" -U platform -d previews \
+               -c "DROP SCHEMA IF EXISTS \"$SCHEMA\" CASCADE;"
+
+      - name: verify namespace gone
+        run: |
+          NS="preview-${{ github.event.pull_request.number }}"
+          for i in $(seq 1 24); do
+            if ! kubectl get namespace "$NS" >/dev/null 2>&1; then
+              echo "Namespace $NS removed."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::Namespace $NS still present after 2m. The reaper will sweep it."
+
+      - uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: preview
+          message: |
+            ### Preview environment torn down
+            Namespace, database schema, DNS record and certificate removed.

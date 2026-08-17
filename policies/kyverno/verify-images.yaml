@@ -1,0 +1,46 @@
+# Supply chain enforcement: only images this platform built, signed and scanned
+# may run. Closes the loop opened by .github/workflows/build-app.yml.
+#
+# This is the policy that makes the CI signing step mean something. Signing
+# without verification is theatre.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify cosign signatures
+    policies.kyverno.io/category: Supply chain / NZISM 14.5
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+  rules:
+    - name: verify-ecr-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      # Platform addons come from upstream registries and are out of scope here;
+      # they are pinned by digest in gitops/platform/ instead.
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, argocd, kyverno, cert-manager, monitoring]
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.ap-southeast-2.amazonaws.com/kea/*"
+          mutateDigest: true      # pin the resolved digest into the pod spec
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # GitHub Actions OIDC — the signature proves *which workflow*
+                    # on *which repo* built this image. Keyless means no signing
+                    # key to leak.
+                    subject: "https://github.com/CHANGEME/CHANGEME/.github/workflows/build-app.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
