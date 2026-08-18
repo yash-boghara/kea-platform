@@ -31,10 +31,9 @@ module "eks" {
   source = "../../modules/eks"
 
   name       = local.name
-  vpc_id     = module.network.vpc_id
   subnet_ids = module.network.private_subnet_ids
 
-  kubernetes_version = "1.31"
+  kubernetes_version = "1.33"
 
   # Karpenter handles the rest; this node group exists only to run Karpenter
   # itself and the other controllers that must not be evicted mid-scale-down.
@@ -46,10 +45,10 @@ module "eks" {
     capacity_type  = "ON_DEMAND"
   }
 
-  # Preview workloads are spot. They are ephemeral by definition, so
-  # interruption is cheap — this is the right risk/cost trade here and worth
-  # being able to explain.
-  karpenter_capacity_types = ["spot", "on-demand"]
+  # Which capacity types Karpenter may use is NOT set here: a NodePool is a
+  # Kubernetes CRD, so it is reconciled from gitops/platform/karpenter/ like
+  # every other in-cluster object. Terraform only creates what the cluster
+  # cannot create for itself.
 
   enable_irsa                   = true
   cluster_endpoint_public       = true
@@ -75,7 +74,6 @@ module "preview_data" {
   source = "../../modules/preview-data"
 
   name       = local.name
-  vpc_id     = module.network.vpc_id
   subnet_ids = module.network.private_subnet_ids
 
   # ONE instance, schema per PR. An instance per PR is the expensive mistake.
